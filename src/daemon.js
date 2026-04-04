@@ -3,6 +3,7 @@ const net = require('net')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
+const WebSocket = require('ws')
 const { deriveTopic, agentId } = require('./crypto')
 const store = require('./store')
 
@@ -30,6 +31,8 @@ class WalkieDaemon {
     this.peers = new Map()     // remoteKey hex -> { conn, channels: Set }
     this.msgSeq = 0
     this._compactTimer = null
+    this.relay = null
+    this._relayRetryTimer = null
   }
 
   async start() {
@@ -55,6 +58,10 @@ class WalkieDaemon {
     process.on('SIGINT', () => this.shutdown())
 
     log(`Daemon started id=${this.id} pid=${process.pid}`)
+
+    // Connect to relay (defaults to XRPLClaw relay, override with WALKIE_RELAY env)
+    const relayUrl = process.env.WALKIE_RELAY || 'wss://relay.xrplclaw.com'
+    this._connectRelay(relayUrl)
   }
 
   // ── IPC (CLI <-> Daemon) ──────────────────────────────────────────
@@ -264,6 +271,7 @@ class WalkieDaemon {
       discovery,
       persist: !!persist,
       knownMsgIds: persist ? store.loadIds(name) : null,
+      recentIds: new Set(),  // dedup across DHT + relay delivery paths
       peers: new Set(),
       subscribers: new Map()
     })
@@ -276,6 +284,12 @@ class WalkieDaemon {
   _reannounce() {
     const topics = Array.from(this.channels.values()).map(ch => ch.topicHex)
     const hello = JSON.stringify({ t: 'hello', topics, id: this.id }) + '\n'
+
+    // Update relay subscriptions
+    if (this.relay?.readyState === WebSocket.OPEN) {
+      this.relay.send(JSON.stringify({ t: 'hello', topics, id: this.id }))
+    }
+
     for (const [remoteKey, peer] of this.peers) {
       if (peer.conn?.writable) {
         log(`Re-announcing ${topics.length} topic(s) to ${remoteKey.slice(0, 12)}`)
@@ -365,8 +379,11 @@ class WalkieDaemon {
       for (const [name, ch] of this.channels) {
         if (ch.topicHex === msg.topic) {
           const msgId = msg.msgId || `${msg.id}-${msg.ts}`
+          // Dedup across DHT + relay paths
+          if (ch.recentIds.has(msgId)) break
+          ch.recentIds.add(msgId)
+          if (ch.recentIds.size > 1000) ch.recentIds.clear()
           const entry = { from: msg.from || msg.id || remoteKey.slice(0, 8), data: msg.data, ts: msg.ts, id: msgId }
-          // Dedup for persistent channels
           if (ch.persist) {
             if (ch.knownMsgIds.has(msgId)) break
             ch.knownMsgIds.add(msgId)
@@ -429,6 +446,85 @@ class WalkieDaemon {
     }
   }
 
+  // ── Relay (same-network fallback) ─────────────────────────────────
+
+  _connectRelay(url) {
+    const ws = new WebSocket(url)
+
+    ws.on('open', () => {
+      this.relay = ws
+      log(`Relay connected: ${url}`)
+      const topics = Array.from(this.channels.values()).map(ch => ch.topicHex)
+      ws.send(JSON.stringify({ t: 'hello', topics, id: this.id }))
+    })
+
+    ws.on('message', (raw) => {
+      try { this._onRelayMessage(JSON.parse(raw.toString())) } catch {}
+    })
+
+    ws.on('close', () => {
+      this.relay = null
+      log('Relay disconnected, reconnecting in 5s')
+      this._relayRetryTimer = setTimeout(() => this._connectRelay(url), 5000)
+    })
+
+    ws.on('error', () => {}) // error always followed by close
+  }
+
+  _onRelayMessage(msg) {
+    if (msg.t === 'msg') {
+      for (const [name, ch] of this.channels) {
+        if (ch.topicHex === msg.topic) {
+          const msgId = msg.msgId || `${msg.id}-${msg.ts}`
+          // Dedup across DHT + relay paths
+          if (ch.recentIds.has(msgId)) break
+          ch.recentIds.add(msgId)
+          if (ch.recentIds.size > 1000) ch.recentIds.clear()
+          const entry = { from: msg.from || msg.id, data: msg.data, ts: msg.ts, id: msgId }
+          if (ch.persist) {
+            if (ch.knownMsgIds.has(msgId)) break
+            ch.knownMsgIds.add(msgId)
+            store.append(name, entry)
+          }
+          this._deliverLocal(ch, entry, null)
+          break
+        }
+      }
+      return
+    }
+
+    if (msg.t === 'sync_req') {
+      for (const [name, ch] of this.channels) {
+        if (ch.topicHex === msg.topic && ch.persist) {
+          const cutoff = Date.now() - TTL_MS
+          const since = Math.max(msg.since || 0, cutoff)
+          const messages = store.read(name, since)
+          if (this.relay?.readyState === WebSocket.OPEN) {
+            this.relay.send(JSON.stringify({ t: 'sync_resp', topic: ch.topicHex, messages }))
+          }
+          break
+        }
+      }
+      return
+    }
+
+    if (msg.t === 'sync_resp') {
+      for (const [name, ch] of this.channels) {
+        if (ch.topicHex === msg.topic && ch.persist) {
+          for (const entry of (msg.messages || [])) {
+            const msgId = entry.id || `${entry.from}-${entry.ts}`
+            if (ch.knownMsgIds.has(msgId)) continue
+            ch.knownMsgIds.add(msgId)
+            entry.id = msgId
+            store.append(name, entry)
+            this._deliverLocal(ch, entry, null)
+          }
+          break
+        }
+      }
+    }
+  }
+
   // ── Send ──────────────────────────────────────────────────────────
 
   _send(channelName, message, senderClientId) {
@@ -454,6 +550,11 @@ class WalkieDaemon {
         peer.conn.write(payload)
         count++
       }
+    }
+
+    // Forward through relay (same-network fallback)
+    if (this.relay?.readyState === WebSocket.OPEN) {
+      this.relay.send(JSON.stringify({ t: 'msg', topic: ch.topicHex, data: message, id: this.id, from: senderClientId || this.id, msgId, ts }))
     }
 
     // Deliver to local subscribers (excluding sender)
@@ -489,6 +590,8 @@ class WalkieDaemon {
 
   async shutdown() {
     if (this._compactTimer) clearInterval(this._compactTimer)
+    if (this._relayRetryTimer) clearTimeout(this._relayRetryTimer)
+    if (this.relay) { try { this.relay.close() } catch {} }
     try { fs.unlinkSync(IPC_PATH) } catch {}
     try { fs.unlinkSync(PID_FILE) } catch {}
     await this.swarm.destroy()

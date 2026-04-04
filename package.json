@@ -1,17 +1,17 @@
 {
-  "name": "walkie-sh",
-  "version": "1.5.0",
+  "name": "@xrplclaw/walkie-sh",
+  "version": "1.6.0",
   "description": "P2P communication CLI for AI agents. No server. No setup. Just talk.",
   "homepage": "https://walkie.sh",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vikasprogrammer/walkie.git"
+    "url": "git+https://github.com/ShaneOnChain/walkie.git"
   },
   "bugs": {
     "url": "https://github.com/vikasprogrammer/walkie/issues"
   },
   "license": "MIT",
-  "author": "vikasprogrammer",
+  "author": "ShaneOnChain",
   "keywords": [
     "p2p",
     "agent",

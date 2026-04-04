@@ -706,6 +706,22 @@ program
   })
 
 program
+  .command('relay')
+  .description('Start WebSocket relay server for same-network daemon bridging')
+  .option('-p, --port <port>', 'WebSocket port', '9900')
+  .option('-H, --host <host>', 'Bind address', '0.0.0.0')
+  .action(async (opts) => {
+    try {
+      const { WalkieRelay } = require('../src/relay')
+      const relay = new WalkieRelay()
+      await relay.start(parseInt(opts.port, 10), opts.host)
+    } catch (e) {
+      console.error(`Error: ${e.message}`)
+      process.exit(1)
+    }
+  })
+
+program
   .command('stop')
   .description('Stop the walkie daemon')
   .action(async () => {
