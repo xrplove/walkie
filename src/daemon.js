@@ -14,6 +14,7 @@ const IPC_PATH = IS_WINDOWS
   : path.join(WALKIE_DIR, 'daemon.sock')
 const PID_FILE = path.join(WALKIE_DIR, 'daemon.pid')
 const LOG_FILE = path.join(WALKIE_DIR, 'daemon.log')
+const SUBS_FILE = path.join(WALKIE_DIR, 'subscriptions.json')
 
 function log(...args) {
   const line = `[${new Date().toISOString()}] ${args.join(' ')}\n`
@@ -62,6 +63,9 @@ class WalkieDaemon {
     // Connect to relay (defaults to XRPLClaw relay, override with WALKIE_RELAY env)
     const relayUrl = process.env.WALKIE_RELAY || 'wss://relay.xrplclaw.com'
     this._connectRelay(relayUrl)
+
+    // Restore persisted channel subscriptions from previous session
+    await this._restoreSubscriptions()
   }
 
   // ── IPC (CLI <-> Daemon) ──────────────────────────────────────────
@@ -242,6 +246,30 @@ class WalkieDaemon {
     }
   }
 
+  // ── Subscription persistence ──────────────────────────────────────
+
+  _saveSubscriptions() {
+    const subs = []
+    for (const [name, ch] of this.channels) {
+      if (ch.persist && ch.secret) {
+        subs.push({ channel: name, secret: ch.secret })
+      }
+    }
+    try { fs.writeFileSync(SUBS_FILE, JSON.stringify(subs)) } catch {}
+  }
+
+  async _restoreSubscriptions() {
+    let subs
+    try { subs = JSON.parse(fs.readFileSync(SUBS_FILE, 'utf8')) } catch { return }
+    if (!Array.isArray(subs)) return
+    for (const { channel, secret } of subs) {
+      if (channel && secret && !this.channels.has(channel)) {
+        log(`Restoring subscription "${channel}"`)
+        await this._joinChannel(channel, secret, true)
+      }
+    }
+  }
+
   // ── Channel management ────────────────────────────────────────────
 
   async _joinChannel(name, secret, persist) {
@@ -253,6 +281,7 @@ class WalkieDaemon {
           ch.persist = true
           ch.knownMsgIds = store.loadIds(name)
           log(`Channel "${name}" upgraded to persistent`)
+          this._saveSubscriptions()
         }
       }
       return
@@ -275,6 +304,9 @@ class WalkieDaemon {
       peers: new Set(),
       subscribers: new Map()
     })
+
+    // Save persistent subscriptions to disk so they survive daemon restart
+    if (persist) this._saveSubscriptions()
 
     // Re-announce topics to already-connected peers (fixes race condition
     // where peer connects before channel is registered)

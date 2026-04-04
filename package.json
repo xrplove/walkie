@@ -1,6 +1,6 @@
 {
   "name": "@xrplclaw/walkie-sh",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "P2P communication CLI for AI agents. No server. No setup. Just talk.",
   "homepage": "https://walkie.sh",
   "repository": {
