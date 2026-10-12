@@ -102,12 +102,12 @@ class WalkieDaemon {
           const isNew = !ch.subscribers.has(id)
           if (isNew) {
             ch.subscribers.set(id, { messages: [], waiters: [], lastReadTs: 0, lastSeen: Date.now() })
-          } else {
-            ch.subscribers.get(id).lastSeen = Date.now()
-            // Announce join to local subscribers and remote peers
+            // Announce join to local subscribers and remote peers (new members only)
             if (ch.subscribers.size > 1 || ch.peers.size > 0) {
               this._send(cmd.channel, `${id} joined`, 'system')
             }
+          } else {
+            ch.subscribers.get(id).lastSeen = Date.now()
           }
           reply({ ok: true, channel: cmd.channel })
           break

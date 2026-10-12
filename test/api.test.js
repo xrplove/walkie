@@ -59,8 +59,9 @@ describe('api.listen()', () => {
     // Verify reader got it
     const resp = await request({ action: 'read', channel: 'test-send', clientId: 'reader' })
     assert.equal(resp.ok, true)
-    assert.equal(resp.messages.length, 1)
-    assert.equal(resp.messages[0].data, 'hello from API')
+    const userMsgs = resp.messages.filter(m => m.from !== 'system')
+    assert.equal(userMsgs.length, 1)
+    assert.equal(userMsgs[0].data, 'hello from API')
 
     await ch.close()
   })
@@ -72,7 +73,7 @@ describe('api.listen()', () => {
     const ch = await listen('test-self:secret', { id: 'self-test' })
 
     const messages = []
-    ch.on('message', (msg) => messages.push(msg))
+    ch.on('message', (msg) => { if (msg.from !== 'system') messages.push(msg) })
 
     // Send as the same ID — should be filtered
     await ch.send('self-message')
@@ -104,6 +105,6 @@ describe('api.send()', () => {
 
     // Verify receiver got it
     const resp = await request({ action: 'read', channel: 'test-oneshot', clientId: 'receiver' })
-    assert.equal(resp.messages[0].data, 'fire-and-forget')
+    assert.equal(resp.messages.filter(m => m.from !== 'system')[0].data, 'fire-and-forget')
   })
 })
